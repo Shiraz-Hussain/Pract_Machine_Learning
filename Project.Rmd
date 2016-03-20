@@ -1,0 +1,209 @@
+---
+title: "Practical Machine Learning - Human Activity Recognition"
+output: html_document
+---
+
+
+#### Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify *how much of a particular activity they do*, but they rarely quantify *how well they do it*. 
+
+In this project, we use the data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways, labelled A, B, C, D and E in the data set.
+
+
+
+### Goal
+
+The goal of this project is to predict the manner in which people did the exercie. That is, the "classe" variable in the training data set.
+
+We look at:
+* how the model is built,
+* how we cross validated the model predictions,
+* what the expected out of sample error is,
+* conclusion of the best model to use,
+* prediction of 20 test cases
+
+
+### Loading packages and getting data
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+# load libraries
+library(caret)
+library(randomForest)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+
+# read training and testing data for project.
+trainUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+data <- read.csv(url(trainUrl), header=TRUE, sep=",", na.strings=c("NA","#DIV/0!",""))
+validation <- read.csv(url(testUrl), header=TRUE, sep=",", na.strings=c("NA","#DIV/0!",""))
+```
+
+
+### Data cleaning for analysis
+
+**Inpect the data** We notice that the first columns don't contain usefull data and that there are many variables with missing data. Besides,some of the variables, like stddev_, avg_, kurtosis_ etc. seem to be derived from the original data. We will exclude them in the next step. Please notice that although the amount of columns of both training and validation set is equal, the last column of the validation set is different (problem_id) in comparison to the last column of the training set (classe). Make sure that you apply the same transformations on both your training and validation set.
+
+```{r, results='hide'}
+summary(data)
+summary(validation)
+dim(data)
+dim(validation)
+```
+
+
+**Remove uncessary columns**
+```{r}
+# first 7 columns don't contain useful info
+data <- data[,-seq(1:7)]
+validation <- validation[,-seq(1:7)]
+```
+
+
+**Remove columns with NAs**
+```{r}
+# select columns that don't have NAs
+indexNA <- as.vector(sapply(data[,1:152],function(x) {length(which(is.na(x)))!=0}))
+data <- data[,!indexNA]
+validation <- validation[,!indexNA]
+```
+
+
+**Remove highly correlated variable** Highly correlated variables can sometimes reduce the performance of a model, and will be excluded.
+
+```{r}
+# set last (classe) and prior (- classe) column index
+last <- as.numeric(ncol(data))
+prior <- last - 1
+
+# set variables to numerics for correlation check, except the "classe"
+for (i in 1:prior) {
+data[,i] <- as.numeric(data[,i])
+validation[,i] <- as.numeric(validation[,i])
+}
+
+# check the correlations
+cor.check <- cor(data[, -c(last)])
+diag(cor.check) <- 0 
+```
+
+```{r}
+# find the highly correlated variables
+highly.cor <- findCorrelation(cor(data[, -c(last)]), cutoff=0.9)
+
+# remove highly correlated variables
+data <- data[, -highly.cor]
+validation <- validation[, -highly.cor]
+```
+
+**Preprocessing of the variables** The amount of predictors is now 46. We will continue with the preprocessing of these predictors, by centering and scaling them. Remember that the last column of the validation set contained the problem_id.
+
+```{r}
+# pre process variables
+last <- as.numeric(ncol(data))
+prior <- last - 1
+preObj <-preProcess(data[,1:prior],method=c('knnImpute', 'center', 'scale'))
+dataPrep <- predict(preObj, data[,1:prior])
+dataPrep$classe <- data$classe
+
+valPrep <-predict(preObj,validation[,1:prior])
+valPrep$problem_id <- validation$problem_id
+```
+
+
+### Creare a cross validation data set
+
+To train and test the model, we create a training and a testing set.
+
+```{r}
+# split dataset into training and test set
+inTrain <- createDataPartition(y=dataPrep$classe, p=0.7, list=FALSE )
+training <- dataPrep[inTrain,]
+testing <- dataPrep[-inTrain,]
+```
+
+
+### Train Model 1: Random Forest
+
+Based on the data, we expect Decision Tree and Random Forest to give the best results. We start with Random Forest. First we set a seed to make this project reproducable. We will use the tuneRF function to calculate the optimal mtry and use that in the random forest function.
+
+```{r, results= 'hide'}
+# set seed for reproducibility
+set.seed(12345)
+
+# get the best mtry
+bestmtry <- tuneRF(training[-last],training$classe, ntreeTry=100, 
+                   stepFactor=1.5,improve=0.01, trace=TRUE, plot=FALSE, dobest=FALSE)
+
+mtry <- bestmtry[as.numeric(which.min(bestmtry[,"OOBError"])),"mtry"]
+```
+```{r}
+# Model 1: RandomForest
+wle.rf <-randomForest(classe~.,data=training, mtry=mtry, ntree=501, 
+                      keep.forest=TRUE, proximity=TRUE, 
+                      importance=TRUE,test=testing)
+```
+
+
+### Results of Model 1
+
+First we plot the Out-Of-Bag (OOB) error-rate. Besides, we will investigate the mean decrease of both accuracy and Gini score. As we can see it was correct to use 501 trees.
+
+```{r}
+# plot the Out of bag error estimates
+layout(matrix(c(1,2),nrow=1), width=c(4,1)) 
+par(mar=c(5,4,4,0)) #No margin on the right side
+plot(wle.rf, log="y", main ="Out-of-bag (OOB) error estimate per Number of Trees")
+par(mar=c(5,0,4,2)) #No margin on the left side
+plot(c(0,1),type="n", axes=F, xlab="", ylab="")
+legend("top", colnames(wle.rf$err.rate),col=1:6,cex=0.8,fill=1:6)
+```
+
+```{r}
+# plot the accuracy and Gini
+varImpPlot(wle.rf, main="Mean Decrease of Accuracy and Gini per variable")
+```
+
+### Accuracy of Model 1 on training set and cross validation set
+
+Here we use Model 1 to predict both the training and testing sets. With the test set, we obtain an accuracy of above 99%, which seems to be acceptable. However, we will also test the Decision Tree model.
+
+```{r}
+# results with training set
+predict1 <- predict(wle.rf, newdata=training)
+confusionMatrix(predict1,training$classe)
+
+# results with test set
+predict2 <- predict(wle.rf, newdata=testing)
+confusionMatrix(predict2,testing$classe)
+```
+
+### Train Model 2: Decision Tree
+
+```{r}
+# Model 2: Decision Tree
+dt <- rpart(classe ~ ., data=training, method="class")
+
+# fancyRpartPlot works for small trees, but not for ours
+fancyRpartPlot(dt)
+```
+
+###  Accuracy Model 2 on training set and cross validation set
+As we can see, this model is not performing too well with accuracy well below 90%. Therefor, we will continue with model 1.
+
+```{r}
+# cross validation
+predictDT <- predict(dt, testing, type = "class")
+confusionMatrix(predictDT, testing$classe)
+```
+
+### Conclusion
+
+As the Random Forest model gave us the better accuracy on cross-validation, we will choose that model for our predictive purposes.
+
+```{r}
+# Predict the class of the validation set
+answer<-predict(wle.rf,valPrep)
+answer
